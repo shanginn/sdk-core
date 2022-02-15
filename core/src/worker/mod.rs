@@ -34,7 +34,8 @@ use crate::{
     ActivityHeartbeat, CompleteActivityError, PollActivityError, PollWfError, WorkerTrait,
 };
 use activities::{LocalInFlightActInfo, WorkerActivityTasks};
-use futures::{Future, TryFutureExt};
+use futures::{future, Future, TryFutureExt};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{convert::TryInto, sync::Arc};
 use temporal_client::{ServerGatewayApis, WorkflowTaskCompletion};
 use temporal_sdk_core_protos::{
@@ -57,6 +58,12 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use tracing_futures::Instrument;
+
+#[derive(Default, Debug)]
+struct ActivityPollerState {
+    pub local_activities_complete: AtomicBool,
+    pub non_local_activities_complete: AtomicBool,
+}
 
 /// A worker polls on a certain task queue
 pub struct Worker {
@@ -87,7 +94,8 @@ pub struct Worker {
     shutdown_token: CancellationToken,
     /// Will be called at the end of each activation completion
     post_activate_hook: Option<Box<dyn Fn(&Self) + Send + Sync>>,
-
+    /// Stores the poller state for local and non-local activities
+    activity_poller_state: ActivityPollerState,
     metrics: MetricsContext,
 }
 
@@ -252,6 +260,7 @@ impl Worker {
         };
         let pa_notif = Arc::new(Notify::new());
         let wfts_drained_notify = Arc::new(Notify::new());
+        let has_non_local_activities = act_poller.is_some();
         Self {
             server_gateway: sg.clone(),
             sticky_name: sticky_queue_name,
@@ -282,6 +291,11 @@ impl Worker {
             post_activate_hook: None,
             pending_activations_notify: pa_notif,
             wfts_drained_notify,
+            activity_poller_state: ActivityPollerState {
+                // TODO: make this compatible with lang activity only worker
+                local_activities_complete: Default::default(),
+                non_local_activities_complete: AtomicBool::new(has_non_local_activities),
+            },
             metrics,
         }
     }
@@ -340,19 +354,41 @@ impl Worker {
     /// Returns `Ok(None)` in the event of a poll timeout or if the polling loop should otherwise
     /// be restarted
     pub(crate) async fn activity_poll(&self) -> Result<Option<ActivityTask>, PollActivityError> {
+        let local_activities_complete = self
+            .activity_poller_state
+            .local_activities_complete
+            .load(Ordering::SeqCst);
+        let non_local_activities_complete = self
+            .activity_poller_state
+            .non_local_activities_complete
+            .load(Ordering::SeqCst);
+        if non_local_activities_complete && local_activities_complete {
+            return Err(PollActivityError::ShutDown);
+        };
+
         let act_mgr_poll = async {
             if let Some(ref act_mgr) = self.at_task_mgr {
-                act_mgr.poll().await
+                if non_local_activities_complete {
+                    future::pending().await
+                } else {
+                    act_mgr.poll().await
+                }
             } else {
-                self.shutdown_token.cancelled().await;
-                Err(PollActivityError::ShutDown)
+                future::pending().await
+            }
+        };
+        let local_act_mgr_poll = async {
+            if local_activities_complete {
+                future::pending().await
+            } else {
+                self.local_act_mgr.next_pending().await
             }
         };
 
         tokio::select! {
             biased;
 
-            r = self.local_act_mgr.next_pending() => {
+            r = local_act_mgr_poll => {
                 match r {
                     Some(DispatchOrTimeoutLA::Dispatch(r)) => Ok(Some(r)),
                     Some(DispatchOrTimeoutLA::Timeout { run_id, resolution, task }) => {
@@ -361,14 +397,20 @@ impl Worker {
                         Ok(task)
                     },
                     None => {
-                        if self.shutdown_token.is_cancelled() {
-                            return Err(PollActivityError::ShutDown);
-                        }
+                        self.activity_poller_state.local_activities_complete.store(true, Ordering::SeqCst);
                         Ok(None)
                     }
                 }
             },
-            r = act_mgr_poll => r,
+            r = act_mgr_poll => {
+                match r {
+                    Err(PollActivityError::ShutDown) => {
+                        self.activity_poller_state.non_local_activities_complete.store(true, Ordering::SeqCst);
+                        Ok(None)
+                    },
+                    other => other,
+                }
+            },
         }
     }
 
