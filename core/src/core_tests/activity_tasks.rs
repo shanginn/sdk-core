@@ -114,7 +114,8 @@ async fn activity_not_found_returns_ok() {
     })
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -209,7 +210,8 @@ async fn heartbeats_report_cancels_only_once() {
     })
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -285,7 +287,8 @@ async fn activity_cancel_interrupts_poll() {
     };
     // So that we know we blocked
     assert_eq!(last_finisher.load(Ordering::Acquire), 2);
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -423,7 +426,8 @@ async fn many_concurrent_heartbeat_cancels() {
     })
     .await;
 
-    worker.shutdown().await;
+    // worker.shutdown().await;
+    worker.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -475,7 +479,8 @@ async fn activity_timeout_no_double_resolve() {
     )
     .await;
 
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -509,7 +514,8 @@ async fn can_heartbeat_acts_during_shutdown() {
     let complete_order = RefCell::new(vec![]);
     // Start shutdown before completing the activity
     let shutdown_fut = async {
-        core.shutdown().await;
+        // core.shutdown().await;
+        core.initiate_shutdown();
         complete_order.borrow_mut().push(1);
     };
     let complete_fut = async {
@@ -579,7 +585,8 @@ async fn complete_act_with_fail_flushes_heartbeat() {
     })
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 
     // Verify the last seen call to record a heartbeat had the last detail payload
     let last_seen_payload = &last_seen_payload.take().unwrap().payloads[0];

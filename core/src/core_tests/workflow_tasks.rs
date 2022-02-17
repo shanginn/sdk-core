@@ -702,7 +702,8 @@ async fn complete_activation_with_failure(
         ],
     )
     .await;
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[rstest(hist_batches, case::incremental(&[1, 2]), case::replay(&[2]))]
@@ -911,7 +912,8 @@ async fn max_concurrent_wft_respected() {
     let _ = core
         .complete_workflow_activation(WorkflowActivationCompletion::empty(r2.run_id))
         .await;
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[rstest(hist_batches, case::incremental(&[1, 2]), case::replay(&[3]))]
@@ -1047,7 +1049,8 @@ async fn lots_of_workflows() {
     })
     .await;
     assert_eq!(worker.outstanding_workflow_tasks(), 0);
-    worker.shutdown().await;
+    // worker.shutdown().await;
+    worker.initiate_shutdown();
 }
 
 #[rstest(hist_batches, case::incremental(&[1, 2]), case::replay(&[2]))]
@@ -1128,7 +1131,8 @@ async fn complete_after_eviction() {
     ))
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1154,7 +1158,8 @@ async fn sends_appropriate_sticky_task_queue_responses() {
     ))
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1184,7 +1189,8 @@ async fn new_server_work_while_eviction_outstanding_doesnt_overwrite_activation(
     let act = core.poll_workflow_activation().await;
     assert_matches!(act, Err(PollWfError::TonicError(err))
                     if err.message() == NO_MORE_WORK_ERROR_MSG);
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1254,7 +1260,8 @@ async fn buffered_work_drained_on_shutdown() {
     tokio::join!(poll_fut, complete_first, async {
         // If the shutdown is sent too too fast, we might not have got a chance to even buffer work
         tokio::time::sleep(Duration::from_millis(5)).await;
-        core.shutdown().await;
+        // core.shutdown().await;
+        core.initiate_shutdown();
     });
 }
 
@@ -1355,7 +1362,8 @@ async fn fail_wft_then_recover() {
     ))
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1441,7 +1449,8 @@ async fn lang_slower_than_wft_timeouts() {
     ))
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1494,7 +1503,8 @@ async fn tries_cancel_of_completed_activity() {
     .await
     .unwrap();
 
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1558,7 +1568,8 @@ async fn failing_wft_doesnt_eat_permit_forever() {
         .await
         .unwrap();
 
-    worker.shutdown().await;
+    // worker.shutdown().await;
+    worker.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -1629,7 +1640,8 @@ async fn cache_miss_doesnt_eat_permit_forever() {
         .await
         .unwrap();
 
-    worker.shutdown().await;
+    // worker.shutdown().await;
+    worker.initiate_shutdown();
 }
 
 /// This test verifies that WFTs which come as replies to completing a WFT are properly delivered
@@ -1687,5 +1699,6 @@ async fn tasks_from_completion_are_delivered() {
     ))
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }

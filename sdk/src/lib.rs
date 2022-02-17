@@ -257,7 +257,8 @@ impl TestRustWorker {
             h??;
         }
         before_shutdown();
-        myself.worker.shutdown().await;
+        // myself.worker.shutdown().await;
+        myself.worker.initiate_shutdown();
         myself.workflow_half.workflows.clear();
         Ok(())
     }

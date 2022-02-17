@@ -133,7 +133,8 @@ async fn legacy_query(#[case] include_history: bool) {
         ))
         .await
         .unwrap();
-    worker.shutdown().await;
+    worker.initiate_shutdown();
+    // worker.shutdown().await;
 }
 
 #[rstest::rstest]
@@ -216,7 +217,8 @@ async fn new_queries(#[case] num_queries: usize) {
     ))
     .await
     .unwrap();
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[tokio::test]
@@ -277,7 +279,8 @@ async fn legacy_query_failure_on_wft_failure() {
     .await
     .unwrap();
 
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }
 
 #[rstest::rstest]
@@ -369,5 +372,6 @@ async fn legacy_query_after_complete(#[values(false, true)] full_history: bool) 
         .unwrap();
     }
 
-    core.shutdown().await;
+    // core.shutdown().await;
+    core.initiate_shutdown();
 }

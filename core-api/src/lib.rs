@@ -104,13 +104,7 @@ pub trait Worker: Send + Sync {
     /// [Worker::complete_workflow_activation] for those workflows until they are done. At that point,
     /// the lang SDK can end the process, or drop the [Worker] instance, which will close the
     /// connection.
-    async fn shutdown(&self);
-
-    /// Completes shutdown and frees all resources. You should avoid simply dropping workers, as
-    /// this does not allow async tasks to report any panics that may have occurred cleanly.
-    ///
-    /// This should be called only after [Worker::shutdown] has resolved.
-    async fn finalize_shutdown(self);
+    fn initiate_shutdown(&self);
 }
 
 /// Should be backed by a process-wide singleton who is responsible for telemetry and logging

@@ -189,7 +189,8 @@ async fn local_act_heartbeat(#[case] shutdown_middle: bool) {
         async {
             if shutdown_middle {
                 shutdown_barr.wait().await;
-                core.shutdown().await;
+                // core.shutdown().await;
+                core.initiate_shutdown();
             }
         },
         worker.run_until_done()

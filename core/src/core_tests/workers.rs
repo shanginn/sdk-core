@@ -60,33 +60,39 @@ async fn after_shutdown_of_worker_get_shutdown_err() {
     assert_eq!(res.jobs.len(), 1);
     let run_id = res.run_id;
 
-    tokio::join!(worker.shutdown(), async {
-        // Need to complete task for shutdown to finish
-        worker
-            .complete_workflow_activation(WorkflowActivationCompletion::from_cmd(
-                run_id.clone(),
-                workflow_command::Variant::StartTimer(StartTimer {
-                    seq: 1,
-                    start_to_fire_timeout: Some(Duration::from_secs(1).into()),
-                }),
-            ))
-            .await
-            .unwrap();
-        // Since non-sticky, one more activation for eviction
-        let res = worker.poll_workflow_activation().await.unwrap();
-        assert_matches!(
-            res.jobs[0].variant,
-            Some(workflow_activation_job::Variant::RemoveFromCache(_))
-        );
-        worker
-            .complete_workflow_activation(WorkflowActivationCompletion::empty(run_id.clone()))
-            .await
-            .unwrap();
-        assert_matches!(
-            worker.poll_workflow_activation().await.unwrap_err(),
-            PollWfError::ShutDown
-        );
-    });
+    tokio::join!(
+        async {
+            /* worker.shutdown().await */
+            worker.initiate_shutdown()
+        },
+        async {
+            // Need to complete task for shutdown to finish
+            worker
+                .complete_workflow_activation(WorkflowActivationCompletion::from_cmd(
+                    run_id.clone(),
+                    workflow_command::Variant::StartTimer(StartTimer {
+                        seq: 1,
+                        start_to_fire_timeout: Some(Duration::from_secs(1).into()),
+                    }),
+                ))
+                .await
+                .unwrap();
+            // Since non-sticky, one more activation for eviction
+            let res = worker.poll_workflow_activation().await.unwrap();
+            assert_matches!(
+                res.jobs[0].variant,
+                Some(workflow_activation_job::Variant::RemoveFromCache(_))
+            );
+            worker
+                .complete_workflow_activation(WorkflowActivationCompletion::empty(run_id.clone()))
+                .await
+                .unwrap();
+            assert_matches!(
+                worker.poll_workflow_activation().await.unwrap_err(),
+                PollWfError::ShutDown
+            );
+        }
+    );
 }
 
 #[tokio::test]
@@ -104,25 +110,31 @@ async fn shutdown_worker_can_complete_pending_activation() {
         .await
         .unwrap();
 
-    tokio::join!(worker.shutdown(), async {
-        let res = worker.poll_workflow_activation().await.unwrap();
-        // The timer fires
-        assert_eq!(res.jobs.len(), 1);
-        worker
-            .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
-                res.run_id,
-                vec![CompleteWorkflowExecution::default().into()],
-            ))
-            .await
-            .unwrap();
-        // Since non-sticky, one more activation for eviction
-        worker.poll_workflow_activation().await.unwrap();
-        // Now it's shut down
-        assert_matches!(
-            worker.poll_workflow_activation().await.unwrap_err(),
-            PollWfError::ShutDown
-        );
-    });
+    tokio::join!(
+        async {
+            /* worker.shutdown().await */
+            worker.initiate_shutdown()
+        },
+        async {
+            let res = worker.poll_workflow_activation().await.unwrap();
+            // The timer fires
+            assert_eq!(res.jobs.len(), 1);
+            worker
+                .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
+                    res.run_id,
+                    vec![CompleteWorkflowExecution::default().into()],
+                ))
+                .await
+                .unwrap();
+            // Since non-sticky, one more activation for eviction
+            worker.poll_workflow_activation().await.unwrap();
+            // Now it's shut down
+            assert_matches!(
+                worker.poll_workflow_activation().await.unwrap_err(),
+                PollWfError::ShutDown
+            );
+        }
+    );
 }
 
 #[tokio::test]
@@ -149,14 +161,15 @@ async fn worker_shutdown_during_poll_doesnt_deadlock() {
     let worker = mock_worker(MocksHolder::from_mock_worker(mock_gateway, mw));
     let pollfut = worker.poll_workflow_activation();
     let shutdownfut = async {
-        worker.shutdown().await;
+        // worker.shutdown().await;
+        worker.initiate_shutdown();
         // Either the send works and unblocks the poll or the poll future is dropped before actually
         // polling -- either way things worked OK
         let _ = tx.send(true);
     };
     let (pollres, _) = tokio::join!(pollfut, shutdownfut);
     assert_matches!(pollres.unwrap_err(), PollWfError::ShutDown);
-    worker.finalize_shutdown().await;
+    // worker.finalize_shutdown().await;
 }
 
 #[tokio::test]
@@ -175,7 +188,8 @@ async fn can_shutdown_local_act_only_worker_when_act_polling() {
     tokio::join!(
         async {
             barrier.wait().await;
-            worker.shutdown().await;
+            // worker.shutdown().await;
+            worker.initiate_shutdown();
         },
         async {
             let res = worker.poll_workflow_activation().await.unwrap();
@@ -191,7 +205,7 @@ async fn can_shutdown_local_act_only_worker_when_act_polling() {
             );
         }
     );
-    worker.finalize_shutdown().await;
+    // worker.finalize_shutdown().await;
 }
 
 #[tokio::test]
@@ -210,7 +224,8 @@ async fn complete_with_task_not_found_during_shutdwn() {
     let complete_order = RefCell::new(vec![]);
     // Initiate shutdown before completing the activation
     let shutdown_fut = async {
-        core.shutdown().await;
+        // core.shutdown().await;
+        core.initiate_shutdown();
         complete_order.borrow_mut().push(3);
     };
     let poll_fut = async {

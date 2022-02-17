@@ -36,6 +36,7 @@ use crate::{
 use activities::{LocalInFlightActInfo, WorkerActivityTasks};
 use futures::{future, Future, TryFutureExt};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::{convert::TryInto, sync::Arc};
 use temporal_client::{ServerGatewayApis, WorkflowTaskCompletion};
 use temporal_sdk_core_protos::{
@@ -54,7 +55,7 @@ use temporal_sdk_core_protos::{
     },
     TaskToken,
 };
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use tracing_futures::Instrument;
@@ -63,6 +64,69 @@ use tracing_futures::Instrument;
 struct ActivityPollerState {
     pub local_activities_complete: AtomicBool,
     pub non_local_activities_complete: AtomicBool,
+}
+
+#[derive(Debug)]
+struct ShutdownNotifier {
+    drain_watch_tx: watch::Sender<usize>,
+    pub receiver: ShutdownNotificationReceiver,
+}
+
+#[derive(Debug, Clone)]
+struct ShutdownNotificationReceiver {
+    drain_watch_rx: watch::Receiver<usize>,
+    shutdown_token: CancellationToken,
+}
+
+#[async_trait::async_trait]
+pub trait OneshotNotification: Sync {
+    async fn ready(&self);
+}
+
+impl ShutdownNotifier {
+    pub fn new() -> Self {
+        let (drain_watch_tx, drain_watch_rx) = watch::channel(0);
+        return Self {
+            receiver: ShutdownNotificationReceiver {
+                drain_watch_rx,
+                shutdown_token: CancellationToken::new(),
+            },
+            drain_watch_tx,
+        };
+    }
+
+    pub fn set_num_active_wfts(&self, num: usize) {
+        let _ = self.drain_watch_tx.send(num);
+    }
+
+    pub fn notify_shutdown(&self) {
+        self.receiver.shutdown_token.cancel();
+    }
+}
+
+#[async_trait::async_trait]
+impl OneshotNotification for ShutdownNotificationReceiver {
+    async fn ready(&self) {
+        let mut rx = self.drain_watch_rx.clone();
+        while rx.changed().await.is_ok() {
+            if *rx.borrow() == 0 && self.shutdown_token.is_cancelled() {
+                break;
+            }
+        }
+    }
+}
+
+// #[cfg(test)]
+#[derive(Default)]
+pub struct TokenOneshotNotification {
+    pub token: CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl OneshotNotification for TokenOneshotNotification {
+    async fn ready(&self) {
+        self.token.cancelled().await;
+    }
 }
 
 /// A worker polls on a certain task queue
@@ -89,9 +153,7 @@ pub struct Worker {
     pending_activations_notify: Arc<Notify>,
     /// Watched during shutdown to wait for all WFTs to complete. Should be notified any time
     /// a WFT is completed.
-    wfts_drained_notify: Arc<Notify>,
-    /// Has shutdown been called?
-    shutdown_token: CancellationToken,
+    shutdown_notifier: Mutex<ShutdownNotifier>,
     /// Will be called at the end of each activation completion
     post_activate_hook: Option<Box<dyn Fn(&Self) + Send + Sync>>,
     /// Stores the poller state for local and non-local activities
@@ -166,13 +228,8 @@ impl WorkerTrait for Worker {
         &self.config
     }
 
-    async fn shutdown(&self) {
-        self.shutdown().await
-    }
-
-    async fn finalize_shutdown(self) {
-        self.shutdown().await;
-        self.finalize_shutdown().await
+    fn initiate_shutdown(&self) {
+        self.initiate_shutdown()
     }
 }
 
@@ -259,12 +316,15 @@ impl Worker {
             }
         };
         let pa_notif = Arc::new(Notify::new());
-        let wfts_drained_notify = Arc::new(Notify::new());
+        let shutdown_notifier = ShutdownNotifier::new();
         let has_non_local_activities = act_poller.is_some();
         Self {
             server_gateway: sg.clone(),
             sticky_name: sticky_queue_name,
-            wf_task_source: WFTSource::new(wft_poller),
+            wf_task_source: WFTSource::new(
+                wft_poller,
+                Box::new(shutdown_notifier.receiver.clone()),
+            ),
             wft_manager: WorkflowTaskManager::new(pa_notif.clone(), cache_policy, metrics.clone()),
             at_task_mgr: act_poller.map(|ap| {
                 WorkerActivityTasks::new(
@@ -280,6 +340,7 @@ impl Worker {
                 config.max_outstanding_local_activities,
                 config.namespace.clone(),
                 metrics.with_new_attrs([local_activity_worker_type()]),
+                Box::new(shutdown_notifier.receiver.clone()),
             ),
             workflows_semaphore: MeteredSemaphore::new(
                 config.max_outstanding_workflow_tasks,
@@ -287,14 +348,13 @@ impl Worker {
                 MetricsContext::available_task_slots,
             ),
             config,
-            shutdown_token: CancellationToken::new(),
             post_activate_hook: None,
             pending_activations_notify: pa_notif,
-            wfts_drained_notify,
+            shutdown_notifier: Mutex::new(shutdown_notifier),
             activity_poller_state: ActivityPollerState {
                 // TODO: make this compatible with lang activity only worker
                 local_activities_complete: Default::default(),
-                non_local_activities_complete: AtomicBool::new(has_non_local_activities),
+                non_local_activities_complete: AtomicBool::new(!has_non_local_activities),
             },
             metrics,
         }
@@ -302,42 +362,30 @@ impl Worker {
 
     /// Begins the shutdown process, tells pollers they should stop. Is idempotent.
     pub(crate) fn initiate_shutdown(&self) {
-        self.shutdown_token.cancel();
         // First, we want to stop polling of both activity and workflow tasks
         if let Some(atm) = self.at_task_mgr.as_ref() {
             atm.notify_shutdown();
         }
         self.wf_task_source.stop_pollers();
+        self.shutdown_notifier
+            .lock()
+            .expect("Lock should not fail")
+            .notify_shutdown();
     }
 
-    /// Will shutdown the worker. Does not resolve until all outstanding workflow tasks have been
-    /// completed
-    pub(crate) async fn shutdown(&self) {
-        self.initiate_shutdown();
-        // Next we need to wait for all local activities to finish so no more workflow task
-        // heartbeats will be generated
-        self.local_act_mgr.shutdown_and_wait_all_finished().await;
-        // Then we need to wait for any tasks generated as a result of completing WFTs, which
-        // heartbeating generates
-        self.wf_task_source
-            .wait_for_tasks_from_complete_to_drain()
-            .await;
-        // wait until all outstanding workflow tasks have been completed
-        self.all_wfts_drained().await;
-        // Wait for activities to finish
-        if let Some(acts) = self.at_task_mgr.as_ref() {
-            acts.wait_all_finished().await;
-        }
-    }
-
-    /// Finish shutting down by consuming the background pollers and freeing all resources
-    pub(crate) async fn finalize_shutdown(self) {
-        tokio::join!(self.wf_task_source.shutdown(), async {
-            if let Some(b) = self.at_task_mgr {
-                b.shutdown().await;
-            }
-        });
-    }
+    // /// Will shutdown the worker. Does not resolve until all outstanding workflow tasks have been
+    // /// completed
+    // pub(crate) async fn shutdown(&self) {
+    // Wait until all outstanding workflow tasks have been completed
+    // self.all_wfts_drained().await;
+    // self.wf_task_source.shutdown();
+    // Next we need to notify the local activity manager that of shutdown
+    // self.local_act_mgr.shutdown();
+    // // Wait for activities to finish
+    // if let Some(acts) = self.at_task_mgr.as_ref() {
+    //     acts.wait_all_finished().await;
+    // }
+    // }
 
     pub(crate) fn outstanding_workflow_tasks(&self) -> usize {
         self.wft_manager.outstanding_wft()
@@ -494,7 +542,7 @@ impl Worker {
                 // Continue here means that we unnecessarily add another permit to the poll buffer,
                 // this will go away when polling is done in the background.
                 _ = self.pending_activations_notify.notified() => continue,
-                r = self.workflow_poll_or_wfts_drained() => r,
+                r = self.workflow_poll() => r,
             }?;
 
             if let Some(work) = selected_f {
@@ -546,7 +594,10 @@ impl Worker {
             // the run.
             self.return_workflow_task_permit();
         }
-        self.wfts_drained_notify.notify_waiters();
+        self.shutdown_notifier
+            .lock()
+            .expect("Lock should not fail")
+            .set_num_active_wfts(self.outstanding_workflow_tasks());
 
         if let Some(h) = &self.post_activate_hook {
             h(self);
@@ -592,28 +643,6 @@ impl Worker {
         });
     }
 
-    /// Resolves with WFT poll response or `PollWfError::ShutDown` if WFTs have been drained
-    async fn workflow_poll_or_wfts_drained(
-        &self,
-    ) -> Result<Option<ValidPollWFTQResponse>, PollWfError> {
-        loop {
-            tokio::select! {
-                biased;
-
-                r = self.workflow_poll().map_err(Into::into) => {
-                    if matches!(r, Err(PollWfError::ShutDown)) {
-                        // Don't actually return shutdown until workflow tasks are drained.
-                        // Outstanding tasks being completed will generate new pending activations
-                        // which will cause us to abort this function.
-                        self.all_wfts_drained().await;
-                    }
-                    return r
-                },
-                _ = self.shutdown_token.cancelled() => {},
-            }
-        }
-    }
-
     /// Wait until not at the outstanding workflow task limit, and then poll this worker's task
     /// queue for new workflow tasks.
     ///
@@ -624,12 +653,12 @@ impl Worker {
         // heartbeating which is a "new" workflow task that we need to accept and process as long as
         // the LA is outstanding. Similarly, if we already have such tasks (from a WFT completion),
         // then we must fetch them from the source before we can say workflow polling is shutdown.
-        if self.shutdown_token.is_cancelled()
-            && !self.wf_task_source.has_tasks_from_complete()
-            && self.local_act_mgr.num_outstanding() == 0
-        {
-            return Err(PollWfError::ShutDown);
-        }
+        // if self.shutdown_token.is_cancelled()
+        //     && !self.wf_task_source.has_tasks_from_complete()
+        //     && self.local_act_mgr.num_outstanding() == 0
+        // {
+        //     return Err(PollWfError::ShutDown);
+        // }
 
         let sem = self
             .workflows_semaphore
@@ -975,13 +1004,6 @@ impl Worker {
                     self.config.sticky_queue_schedule_to_start_timeout.into(),
                 ),
             })
-    }
-
-    /// Resolves when there are no more outstanding WFTs
-    async fn all_wfts_drained(&self) {
-        while self.outstanding_workflow_tasks() != 0 {
-            self.wfts_drained_notify.notified().await;
-        }
     }
 }
 

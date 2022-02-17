@@ -35,12 +35,13 @@ async fn after_shutdown_server_is_not_polled() {
         .complete_workflow_activation(WorkflowActivationCompletion::empty(res.run_id))
         .await
         .unwrap();
-    worker.shutdown().await;
+    // worker.shutdown().await;
+    worker.initiate_shutdown();
     assert_matches!(
         worker.poll_workflow_activation().await.unwrap_err(),
         PollWfError::ShutDown
     );
-    worker.finalize_shutdown().await;
+    // worker.finalize_shutdown().await;
 }
 
 // Better than cloning a billion arcs...
@@ -94,7 +95,8 @@ async fn shutdown_interrupts_both_polls() {
         async {
             // Give polling a bit to get stuck, then shutdown
             BARR.wait().await;
-            worker.shutdown().await;
+            // worker.shutdown().await;
+            worker.initiate_shutdown();
         }
     };
 }

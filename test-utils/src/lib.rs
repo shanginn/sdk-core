@@ -111,7 +111,8 @@ impl CoreWfStarter {
     }
 
     pub async fn shutdown(&mut self) {
-        self.get_worker().await.shutdown().await;
+        self.get_worker().await.initiate_shutdown();
+        // self.get_worker().await.shutdown().await;
     }
 
     pub async fn get_worker(&mut self) -> Arc<dyn Worker> {
